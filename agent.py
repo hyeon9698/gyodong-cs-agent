@@ -30,6 +30,9 @@ _locks: dict[str, threading.Lock] = {}
 TC_RE = re.compile(r"(?<![A-Za-z_])(?:TC\s*ID|TC|id)\s*[:：=]\s*([A-Za-z0-9][A-Za-z0-9._-]{0,99})", re.I)
 TC_ONLY_RE = re.compile(r"^\s*\[?([A-Z]{1,3}-\d{1,3}(?:-[A-Za-z0-9]+)?)\]?\s*$")
 MEDIA_RE = re.compile(r"(image|audio)\s*:\s*(https?://\S+)", re.I)
+CLAIM_RE = re.compile(r"ESC-\d|넘겨 두었|접수했|접수되었|접수해 두|접수 완료|연결해 두|이관했|이관해 두|전달해 두")
+NUDGE = ("[시스템 확인] 방금 답변은 접수나 이관을 했다고 말했지만 이번 턴에 접수 API를 호출하지 않았다. "
+         "필요하면 지금 해당 API를 호출해 실제 반환된 접수번호로 답하고, 호출하지 않을 거면 접수했다는 표현 없이 다시 답하라.")
 SECRETS = [s for s in (OPENAI_KEY, actions.TOKEN, os.getenv("KAKAO_BOT_TOKEN", "")) if len(s) > 8]
 
 
@@ -77,6 +80,7 @@ def _clean(text: str) -> str:
 
 def _run(session: dict) -> str:
     msgs = [{"role": "system", "content": SYSTEM}] + session["msgs"]
+    posted, nudged = False, False
     for _ in range(MAX_STEPS):
         msg = _openai("chat/completions", json={
             "model": MODEL, "messages": msgs, "tools": actions.TOOLS, "temperature": 0.2,
@@ -84,7 +88,13 @@ def _run(session: dict) -> str:
         calls = msg.get("tool_calls") or []
         msgs.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls")})
         if not calls:
-            return msg.get("content") or ""
+            content = msg.get("content") or ""
+            if not posted and not nudged and CLAIM_RE.search(content):
+                nudged = True  # 접수 API 호출 없이 접수했다고 말한 경우 한 번 바로잡는다
+                msgs.append({"role": "user", "content": NUDGE})
+                continue
+            return content
+        posted |= any(actions.ROUTES.get(c["function"]["name"], ("GET",))[0] != "GET" for c in calls)
 
         def run_call(c):
             try:
